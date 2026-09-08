@@ -13,10 +13,14 @@ import termios
 import threading
 import time
 import tty
-import numpy as np
+from contextlib import nullcontext
+
 import mujoco
 import mujoco.viewer
+import numpy as np
 import onnxruntime as ort
+
+from mjlab_microduck.remote_policy import RemotePolicyClient
 
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_ramps.xml"
@@ -853,9 +857,9 @@ class PolicyInference:
         else:
             print("Head mode: OFF")
 
-    def infer(self):
+    def infer(self, observation=None):
         """Run policy inference and return action."""
-        obs = self.get_observations()
+        obs = self.get_observations() if observation is None else observation
         obs_batch = obs.reshape(1, -1)
         action = self.ort_session.run([self.output_name], {self.input_name: obs_batch})[0]
         action = action.squeeze(0).astype(np.float32)
@@ -947,6 +951,11 @@ def main():
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
                              "compliant PU sole. e.g. --foot-solref 0.04")
+    parser.add_argument("--remote-policy", type=str, default=None, metavar="HOST:PORT",
+                        help="Use the experimental remote server for walking actions; all failures "
+                             "fall back immediately to the local walking ONNX")
+    parser.add_argument("--remote-max-action-age-ms", type=float, default=40.0,
+                        help="Reject remote actions older than this many milliseconds (default: 40)")
     args = parser.parse_args()
 
     if not args.walking and not args.standing and not args.sitstand:
@@ -957,6 +966,12 @@ def main():
         parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and args.roller:
         parser.error("kick/roulade policies are trained on the walking robot, not the roller model")
+    if args.remote_policy and not args.new_cmd_obs:
+        parser.error("--remote-policy requires the unified 61D observation; add --new-cmd-obs")
+    if args.remote_policy and not args.walking:
+        parser.error("--remote-policy requires --walking as the local fallback")
+    if args.remote_max_action_age_ms <= 0:
+        parser.error("--remote-max-action-age-ms must be greater than zero")
 
     # Parse delay arguments
     delay_min_lag = 0
@@ -1127,6 +1142,11 @@ def main():
     print(f"Observation size: {test_obs.size} (expected: {expected_obs_size})")
     if policy.walking_session:
         print(f"Walking policy: loaded")
+    if args.remote_policy:
+        print(
+            f"Remote walking policy: {args.remote_policy} "
+            f"(max age {args.remote_max_action_age_ms:.1f} ms; local fallback loaded)"
+        )
     if policy.standing_session:
         print(f"Standing policy: loaded  (body pose: z=±{BODY_CMD_MAX_Z*1000:.0f}mm, pitch/roll=±{math.degrees(BODY_CMD_MAX_ANGLE):.0f}°)")
     if policy.walking_session and policy.standing_session:
@@ -1357,7 +1377,13 @@ def main():
     print("  A / E:            head_roll ±step")
     print("  SPACE:            reset head offset to zero")
 
-    with TerminalInput() as term, \
+    remote_context = (
+        RemotePolicyClient(args.remote_policy, args.remote_max_action_age_ms)
+        if args.remote_policy
+        else nullcontext(None)
+    )
+
+    with remote_context as remote_policy, TerminalInput() as term, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
         viewer.sync()
         start_time = time.time()
@@ -1392,9 +1418,22 @@ def main():
                 policy.update_behavior(actual_dt)
 
                 if policy_enabled:
-                    action = policy.infer()
+                    observation = policy.get_observations()
+                    remote_action = None
+                    if remote_policy is not None:
+                        if policy.current_policy == "walking":
+                            remote_action = remote_policy.submit_and_take(observation, "walk")
+                        else:
+                            remote_policy.deactivate(f"{policy.current_policy} policy selected")
+                    if remote_action is None:
+                        action = policy.infer(observation)
+                    else:
+                        action = np.asarray(remote_action, dtype=np.float32)
+                        policy.last_action = action.copy()
                     policy.apply_action(action)
                 else:
+                    if remote_policy is not None:
+                        remote_policy.deactivate("policy inference paused")
                     # Paused: keep last ctrl, don't query the policy. Motors
                     # hold position. Use a zero action just so downstream
                     # logging (csv/debug) sees something consistent.
@@ -1428,6 +1467,11 @@ def main():
                         f"lat={avg_lat:+.2f}/{cmd_y:+.2f} m/s  "
                         f"yaw={avg_yaw:+.2f}/{cmd_yaw:+.2f} rad/s   "
                         f"trunk_z={trunk_z*1000:.1f} mm"
+                        + (
+                            f"   remote[{remote_policy.status()}]"
+                            if remote_policy is not None
+                            else ""
+                        )
                     )
 
                 if csv_data is not None:
