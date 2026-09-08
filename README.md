@@ -70,6 +70,7 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-StandUp-{Flat,Rough}-MicroDuck` | flat/rough | Stand up from face-down/face-up/sitting, then hold the stand + body-pose control |
 | `Mjlab-SitStand-{Flat,Rough}-MicroDuck` | flat/rough | Commanded sit ↔ stand in one policy, gently, head commandable |
 | `Mjlab-GroundPick-{Flat,Rough}-MicroDuck` | flat/rough | Crouch and touch the ground with the mouth tip, return to stand |
+| `Mjlab-Bow-Flat-MicroDuck` | flat | One-shot symmetric bow: lean forward, hold, return to stand |
 | `Mjlab-BallKick-Flat-MicroDuck` | flat | Kick a 70 mm / 15 g ball forward (actor is ball-blind) |
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
@@ -94,6 +95,37 @@ The servos are simulated with the same BAM M6 XL330 model the policies are
 trained against (voltage control + load-dependent friction, via
 `bam.mujoco.MujocoController`); `--vin` / `--vin-drop-gain` / `--kp-fw` pin the
 training DR ranges to one value, `--no-bam` falls back to the XML PD actuators.
+
+### Bow prototype
+
+The bow is a separate training task but initially reuses robotd's ground-pick
+slot for deployment.  It follows the slot's 4 s phase command and finishes its
+rise at phase 0.65, before robotd hands control back at phase 0.70.
+
+Always run the smoke test before a long job:
+
+```bash
+uv run train Mjlab-Bow-Flat-MicroDuck \
+    --env.scene.num-envs 64 --agent.max_iterations 5
+```
+
+On a CPU-only Mac, append `--gpu-ids None --agent.logger tensorboard`.  This is
+useful for validating the task wiring, but not for a full training run.
+
+Then train at scale (add `--hf-jobs` on a machine without a CUDA GPU):
+
+```bash
+uv run train Mjlab-Bow-Flat-MicroDuck \
+    --env.scene.num-envs 4096 --agent.max_iterations 1000
+```
+
+Export with `scripts/export.py`, then rehearse the exact runtime phase encoding
+by loading the result through `--ground-pick` and pressing `G`:
+
+```bash
+uv run scripts/infer_policy.py --walking walk.onnx --standing stand.onnx \
+    --ground-pick bow.onnx --ground-pick-period 4.0 --new-cmd-obs
+```
 
 ### Backlash variants
 

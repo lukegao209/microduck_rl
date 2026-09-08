@@ -3058,6 +3058,74 @@ def ground_pick_return_upright_phased(
     return gate * upright
 
 
+def bow_pitch_target(
+    phase: torch.Tensor,
+    target_pitch: float,
+    descent_end: float,
+    hold_end: float,
+    rise_end: float,
+) -> torch.Tensor:
+    """Smooth trunk-pitch target for a stand -> bow -> stand cycle.
+
+    Kept pure so phase timing can be pinned by CPU tests. ``target_pitch`` is
+    an angle in radians; positive means the same forward direction as
+    ``projected_gravity_b[:, 0]`` in the Microduck model.
+    """
+    return target_pitch * phase_pose_blend(phase, descent_end, hold_end, rise_end)
+
+
+def bow_trunk_pitch_track(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    target_pitch: float = math.radians(15.0),
+    std: float = math.radians(8.0),
+    descent_end: float = 0.30,
+    hold_end: float = 0.45,
+    rise_end: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward the phase-scheduled forward pitch of the trunk.
+
+    Pitch comes from gravity expressed in the trunk frame, so it is independent
+    of world yaw and matches the IMU-derived quantity available to the deployed
+    policy. Tracking the trunk rather than a neck joint prevents a quick nod
+    from satisfying the bow objective.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    gravity = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    pitch = torch.atan2(gravity[:, 0], -gravity[:, 2])
+    target = bow_pitch_target(
+        _gp_phase(env, command_name), target_pitch, descent_end, hold_end, rise_end
+    )
+    return torch.exp(-((pitch - target) / std) ** 2)
+
+
+def bow_lateral_tilt_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Positive cost for side lean without penalising the intended forward bow."""
+    asset: Entity = env.scene[asset_cfg.name]
+    lateral_gravity = torch.nan_to_num(asset.data.projected_gravity_b[:, 1], nan=1.0)
+    return lateral_gravity.square()
+
+
+def bow_hold_stillness(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    hold_start: float = 0.30,
+    hold_end: float = 0.45,
+    ang_vel_std: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward a quiet ceremonial pause only inside the bow's hold window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = _gp_phase(env, command_name)
+    holding = ((phase >= hold_start) & (phase < hold_end)).float()
+    speed = torch.nan_to_num(asset.data.root_link_ang_vel_w.norm(dim=-1), nan=1e6)
+    return holding * torch.exp(-((speed / ang_vel_std) ** 2))
+
+
 def neck_vel_descent_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -3459,6 +3527,32 @@ def reward_weight(
         if env.common_step_counter > stage["step"]:
             term_cfg.weight = stage["weight"]
     return torch.tensor([term_cfg.weight])
+
+
+def reward_param_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    reward_name: str,
+    param_name: str,
+    value_stages: list[dict],
+) -> torch.Tensor:
+    """Step-staged numeric parameter on a live reward term.
+
+    ``value_stages`` contains ``{"step": int, "value": float}`` entries. This
+    is deliberately separate from :func:`reward_weight`: a task can make its
+    target harder without changing how much that objective matters relative to
+    the rest of the reward stack. As with every curriculum here, mutate the
+    RewardManager's copy rather than ``env.cfg`` (which is no longer live after
+    manager construction).
+    """
+    del env_ids
+    term_cfg = env.reward_manager.get_term_cfg(reward_name)
+    current = value_stages[0]["value"]
+    for stage in value_stages:
+        if env.common_step_counter >= stage["step"]:
+            current = stage["value"]
+    term_cfg.params[param_name] = current
+    return torch.tensor([current])
 
 
 def com_range_curriculum(

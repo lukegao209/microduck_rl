@@ -39,6 +39,10 @@ from .microduck_ground_pick_env_cfg import (
     make_microduck_ground_pick_env_cfg,
     MicroduckGroundPickRlCfg,
 )
+from .microduck_bow_env_cfg import (
+    make_microduck_bow_env_cfg,
+    MicroduckBowRlCfg,
+)
 from .microduck_ball_kick_env_cfg import (
     make_microduck_ball_kick_env_cfg,
     MicroduckBallKickRlCfg,
@@ -154,6 +158,17 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# Bow — phase-scripted one-shot using the ground-pick runtime slot during the
+# prototype stage. It remains a separate training task so neither reward stack
+# can silently change the other.
+register_mjlab_task(
+    task_id="Mjlab-Bow-Flat-MicroDuck",
+    env_cfg=make_microduck_bow_env_cfg(),
+    play_env_cfg=make_microduck_bow_env_cfg(play=True),
+    rl_cfg=MicroduckBowRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # BallKick task — kick a 70mm/15g ball forward hard with the right foot from a
 # standing start (flat terrain only — a ball on rough terrain is another task).
 register_mjlab_task(
@@ -262,6 +277,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-SitStand-Rough-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {"rough": True}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-GroundPick-Flat-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {}, MicroduckGroundPickRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-GroundPick-Rough-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {"rough": True}, MicroduckGroundPickRlCfg, _BL_GROUNDCONTACT),
+    ("Mjlab-Bow-Flat-Backlash-MicroDuck", make_microduck_bow_env_cfg, {}, MicroduckBowRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-BallKick-Flat-Backlash-MicroDuck", make_microduck_ball_kick_env_cfg, {}, MicroduckBallKickRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck-Rollers", make_microduck_velocity_rollers_env_cfg, {}, MicroduckRollersRlCfg, _BL_ROLLERS),
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
